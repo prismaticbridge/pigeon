@@ -6,7 +6,6 @@ use axum::routing::get;
 use axum::routing::post;
 use axum_server::tls_rustls::RustlsConfig;
 use iroh::Signature;
-use n0_future::IterExt;
 use pigeon::AuthRequest;
 use pigeon::ChangeNameRequest;
 use pigeon::ClientMap;

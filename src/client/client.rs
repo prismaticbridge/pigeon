@@ -62,7 +62,6 @@ async fn online_thread() -> Result<()> {
 async fn main() -> Result<()> {
     let args = Args::parse();
     let key = load_or_create_identity(&constants::DATA_DIR.join(constants::CLIENT_KEY_FILE)).expect("Error: cannot load key");
-    safe_print(&format!("Loaded previous identity. public key signature is {}", key.public()));
     SECRET_KEY.set(key.clone()).expect("SECRET_KEY already set");
     let result = try_load_name(&constants::DATA_DIR.join(constants::NAME_FILE));
     let username = match result {
@@ -73,6 +72,7 @@ async fn main() -> Result<()> {
             create_name_and_register(&constants::DATA_DIR, &key.public(), false).await?
         }
     };
+    safe_print(&format!("Loaded previous identity {}. public key signature is {}", username, key.public()));
     pigeon::common::MDNS_USERNAME.set(username).expect("USERNAME already set");
 
     let online_thread = tokio::spawn(online_thread());
