@@ -1,9 +1,9 @@
-pub mod constants;
 pub mod common;
-use std::collections::HashMap;
-use iroh::{PublicKey, Signature};
-use serde::{Serialize, Deserialize};
+pub mod constants;
 use arrayvec::ArrayString;
+use iroh::{PublicKey, Signature};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Deserialize, Serialize)]
 pub struct RegisterRequest {

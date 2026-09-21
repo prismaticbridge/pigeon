@@ -29,7 +29,6 @@ mod utils;
 struct SharedState {
     clients: Arc<Mutex<ClientMap>>,
 }
-//let config = RustlsConfig::from_pem_file("cert.pem", "key.pem").await.expect("failed to load tls keys");
 
 #[tokio::main]
 async fn main() {
@@ -69,33 +68,31 @@ async fn main() {
     }
 }
 
+///Endpoint for registering with a name and public key, this fails on duplicate name
 async fn handle_registration(
     axum::extract::State(state): axum::extract::State<SharedState>,
     body: axum::body::Bytes,
-) -> Result<StatusCode, (StatusCode, &'static str)> {
-    let payload: RegisterRequest = postcard::from_bytes(&body)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid postcard binary payload"))?;
+) -> Result<(StatusCode, &'static str), (StatusCode, &'static str)> {
+    let payload: RegisterRequest =
+        postcard::from_bytes(&body).map_err(|_| (StatusCode::BAD_REQUEST, "invalid postcard binary payload"))?;
     let mut db = state.clients.lock().await;
     if db.contains_key(&payload.name) {
         debug_print!("Failed to create user: {}", payload.name);
-        Err((StatusCode::BAD_REQUEST, "that name is already registered"))
+        Ok((StatusCode::BAD_REQUEST, "that name is already registered"))
     } else {
         db.insert(payload.name, (payload.publickey, None));
         debug_print!("Created new user: {}", payload.name);
-        Ok(StatusCode::CREATED)
+        Ok((StatusCode::CREATED, "success"))
     }
 }
 
+///Unauthenticated, retrieve a given user's public key
 async fn handle_key_request(
     axum::extract::State(state): axum::extract::State<SharedState>,
     body: axum::body::Bytes,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let payload: GetKeyRequest = postcard::from_bytes(&body).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            String::from("invalid postcard binary payload"),
-        )
-    })?;
+    let payload: GetKeyRequest = postcard::from_bytes(&body)
+        .map_err(|_| (StatusCode::BAD_REQUEST, String::from("invalid postcard binary payload")))?;
     let db = state.clients.lock().await;
     match db.get(&payload.target) {
         None => Err((
@@ -115,15 +112,13 @@ async fn handle_key_request(
     }
 }
 
+///Assign random bytes as a challenge for authentication later
 async fn start_auth(
     axum::extract::State(state): axum::extract::State<SharedState>,
     body: axum::body::Bytes,
 ) -> (StatusCode, String) {
     let Ok(payload) = postcard::from_bytes::<AuthRequest>(&body) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            String::from("invalid postcard binary payload"),
-        );
+        return (StatusCode::BAD_REQUEST, String::from("invalid postcard binary payload"));
     };
     let mut db = state.clients.lock().await;
     let result = db.get_mut(&payload.name);
@@ -146,12 +141,8 @@ async fn start_auth(
     (StatusCode::OK, challenge)
 }
 
-fn verify_auth(
-    db: &mut ClientMap,
-    name: &ArrayString<32>,
-    signature: &Signature,
-    check_admin: bool,
-) -> bool {
+///Check that a client's key signature matches the public key registered in the server. possibly checks if they have admin rights
+fn verify_auth(db: &mut ClientMap, name: &ArrayString<32>, signature: &Signature, check_admin: bool) -> bool {
     let (key, challenge) = match db.get_mut(name) {
         None => return false,
         Some(pair) => match pair.1.take() {
@@ -165,13 +156,10 @@ fn verify_auth(
     if result.is_err() {
         return false;
     }
-    if check_admin {
-        ADMIN_KEYS.contains(key)
-    } else {
-        true
-    }
+    if check_admin { ADMIN_KEYS.contains(key) } else { true }
 }
 
+///Authenticated, change a name in the server's database
 async fn change_name(
     axum::extract::State(state): axum::extract::State<SharedState>,
     body: axum::body::Bytes,
@@ -204,6 +192,8 @@ async fn change_name(
     }
 }
 
+///Downlaod the entire registry of names and private keys, this is used for downloading state before server upgrades
+///authenticated and requires admin
 async fn download_database(
     axum::extract::State(state): axum::extract::State<SharedState>,
     body: axum::body::Bytes,
@@ -213,19 +203,17 @@ async fn download_database(
     };
     let mut db = state.clients.lock().await;
     if !verify_auth(&mut db, &payload.name, &payload.signature, true) {
-        debug_print!(
-            "Auth denied for user {} trying to download database",
-            payload.name
-        );
+        debug_print!("Auth denied for user {} trying to download database", payload.name);
         return Err::<Vec<u8>, StatusCode>(StatusCode::FORBIDDEN);
     }
 
-    let response_bytes =
-        postcard::to_allocvec(&*db).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let response_bytes = postcard::to_allocvec(&*db).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     debug_print!("admin user {} downloaded db", payload.name);
     Ok(response_bytes)
 }
 
+///Replaces the entire registry of names and private keys with the supplied one, this is used for restoring state after server upgrades
+///authenticated and requires admin
 async fn inject_database(
     axum::extract::State(state): axum::extract::State<SharedState>,
     body: axum::body::Bytes,
@@ -236,10 +224,7 @@ async fn inject_database(
     let mut db = state.clients.lock().await;
 
     if !verify_auth(&mut db, &payload.name, &payload.signature, true) {
-        debug_print!(
-            "Auth denied for user {} trying to inject database",
-            payload.name
-        );
+        debug_print!("Auth denied for user {} trying to inject database", payload.name);
         return StatusCode::FORBIDDEN;
     }
 

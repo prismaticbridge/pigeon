@@ -1,21 +1,23 @@
+use clap::Parser;
+use n0_error::{Result, StdResultExt};
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use n0_error::{Result, StdResultExt};
-use clap::Parser;
 
+mod api_wrapper;
 mod connect;
 mod listen;
 mod mdns;
 mod utils;
-mod api_wrapper;
 
-use pigeon::common::{SECRET_KEY, MDNS_USERNAME, ONLINE_USERNAME, load_or_create_identity};
-use pigeon::constants;
+use pigeon::common::{MDNS_USERNAME, ONLINE_USERNAME, SECRET_KEY, load_or_create_identity};
+use pigeon::constants::{self, HTTP_CLIENT};
 
-use crate::api_wrapper::{change_name_interactive, create_name_and_register, download_db, get_public_key, inject_db, register_http};
-use crate::utils::{DiscoveryType, create_endpoint, get_endpoint_info_interactive, safe_print, try_load_name};
-use crate::mdns::exchange_info_mdns;
+use crate::api_wrapper::{
+    change_name_interactive, create_name_and_register, download_db, get_public_key, inject_db, register_http,
+};
 use crate::connect::connect_and_send;
+use crate::mdns::exchange_info_mdns;
+use crate::utils::{DiscoveryType, create_endpoint, get_endpoint_info_interactive, safe_print, try_load_name};
 use listen::listen;
 
 pub static USE_SERVER: OnceLock<bool> = OnceLock::new();
@@ -32,15 +34,21 @@ struct Args {
     inject_db: bool,
 }
 
+///Thread that manages connection with the server
+///Verifies that the public key is up-to-date with the server and prompts to register again if needed
 async fn online_thread() -> Result<()> {
     USE_SERVER.set(true).expect("Can't set USE_SERVER for some reason");
+    let client = &HTTP_CLIENT;
     let current_username = MDNS_USERNAME.get().unwrap();
     let key = SECRET_KEY.get().unwrap();
-    let result = get_public_key(&current_username).await;
+    let result = get_public_key(&current_username, &client).await;
     match result {
         Err(_) => {
             debug_print_above!("Failed to get public key or not registered yet, trying to register");
-            register_http(&current_username, &key.public()).await.anyerr().inspect_err(|e| safe_print(&format!("Failed to register: {e}")))?;
+            register_http(&current_username, &key.public(), &client)
+                .await
+                .anyerr()
+                .inspect_err(|e| safe_print(&format!("Failed to register: {e}")))?;
             ONLINE_USERNAME.set(current_username.clone()).unwrap();
         }
         Ok(server_key) => {
@@ -48,7 +56,13 @@ async fn online_thread() -> Result<()> {
                 ONLINE_USERNAME.set(current_username.clone()).unwrap();
             } else {
                 safe_print("Server and local public keys do not match, creating a new identity");
-                ONLINE_USERNAME.set(create_name_and_register(&constants::DATA_DIR, &key.public(), true).await.anyerr()?).unwrap();
+                ONLINE_USERNAME
+                    .set(
+                        create_name_and_register(&constants::DATA_DIR, &key.public(), true, &client)
+                            .await
+                            .anyerr()?,
+                    )
+                    .unwrap();
             }
         }
     }
@@ -61,41 +75,46 @@ async fn online_thread() -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let key = load_or_create_identity(&constants::DATA_DIR.join(constants::CLIENT_KEY_FILE)).expect("Error: cannot load key");
+    let key =
+        load_or_create_identity(&constants::DATA_DIR.join(constants::CLIENT_KEY_FILE)).expect("Error: cannot load key");
     SECRET_KEY.set(key.clone()).expect("SECRET_KEY already set");
     let result = try_load_name(&constants::DATA_DIR.join(constants::NAME_FILE));
     let username = match result {
-        Ok(username) => {
-            username
-        },
-        Err(_) => {
-            create_name_and_register(&constants::DATA_DIR, &key.public(), false).await?
-        }
+        Ok(username) => username,
+        Err(_) => create_name_and_register(&constants::DATA_DIR, &key.public(), false, &HTTP_CLIENT).await?,
     };
-    safe_print(&format!("Loaded previous identity {}. public key signature is {}", username, key.public()));
-    pigeon::common::MDNS_USERNAME.set(username).expect("USERNAME already set");
+    safe_print(&format!(
+        "Loaded previous identity {}. public key signature is {}",
+        username,
+        key.public()
+    ));
+    pigeon::common::MDNS_USERNAME
+        .set(username)
+        .expect("USERNAME already set");
 
     let online_thread = tokio::spawn(online_thread());
 
     if args.change_name {
         //could technically use "key" but SECRET_KEY should be the single source of truth
-        return change_name_interactive(SECRET_KEY.get().unwrap()).await
-    }
-    else if args.download_db {
+        return change_name_interactive(SECRET_KEY.get().unwrap(), &HTTP_CLIENT).await;
+    } else if args.download_db {
         tokio::time::timeout(
             tokio::time::Duration::from_secs(5),
             tokio::task::spawn_blocking(|| ONLINE_USERNAME.wait()),
         )
-        .await.anyerr()?.anyerr()?;
-        return download_db(SECRET_KEY.get().unwrap()).await
-    }
-    else if args.inject_db {
+        .await
+        .anyerr()?
+        .anyerr()?;
+        return download_db(SECRET_KEY.get().unwrap(), &HTTP_CLIENT).await;
+    } else if args.inject_db {
         tokio::time::timeout(
             tokio::time::Duration::from_secs(5),
             tokio::task::spawn_blocking(|| ONLINE_USERNAME.wait()),
         )
-        .await.anyerr()?.anyerr()?;
-        return inject_db(SECRET_KEY.get().unwrap()).await
+        .await
+        .anyerr()?
+        .anyerr()?;
+        return inject_db(SECRET_KEY.get().unwrap(), &HTTP_CLIENT).await;
     }
 
     let endpoint = create_endpoint().await?;
@@ -116,8 +135,7 @@ async fn main() -> Result<()> {
             listen_thread.abort();
             let _ = listen_thread.await;
         }
-    }
-    else {
+    } else {
         //if not sending, wait for listen thread to properly finish
         listen_thread.await.anyerr()??;
     }
@@ -135,5 +153,5 @@ async fn main() -> Result<()> {
 
     println!("everything is done running, should exit now");
 
-    return Ok(())
+    return Ok(());
 }

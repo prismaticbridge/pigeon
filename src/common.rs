@@ -1,9 +1,9 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
+use arrayvec::ArrayString;
 use iroh::{Endpoint, SecretKey, endpoint::presets};
 use n0_error::{Result, StackResultExt, StdResultExt};
-use arrayvec::{ArrayString};
 
 pub const PIGEON_ALPN: &[u8] = b"pigeon/0";
 pub static MDNS_USERNAME: OnceLock<ArrayString<32>> = OnceLock::new();

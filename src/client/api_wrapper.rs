@@ -1,15 +1,17 @@
-use std::path::Path;
-use std::time::Duration;
-use iroh::{PublicKey, SecretKey, Signature};
-use n0_error::{AnyError, Result, StdResultExt, anyerr};
-use arrayvec::ArrayString;
-use pigeon::constants::{DATA_DIR, DOWNLOAD_DB_URL, INJECT_DB_URL, SERVER_DB_FILE};
-use pigeon::{AuthRequest, ChangeNameRequest, DownloadDbRequest, GetKeyRequest, InjectDbRequest, RegisterRequest};
-use pigeon::common::ONLINE_USERNAME;
-use reqwest::{Certificate, Client, StatusCode};
-use crate::constants::{NAME_FILE, USE_CUSTOM_HTTPS, START_AUTH_URL, CHANGE_NAME_URL, GETKEY_URL, REGISTER_URL};
+use crate::constants::{CHANGE_NAME_URL, GETKEY_URL, NAME_FILE, REGISTER_URL, START_AUTH_URL};
 use crate::debug_print_above;
 use crate::utils::{read_name, safe_print};
+use arrayvec::ArrayString;
+use iroh::{PublicKey, SecretKey, Signature};
+use n0_error::{AnyError, Result, StdResultExt, anyerr};
+use pigeon::common::ONLINE_USERNAME;
+use pigeon::constants::{DATA_DIR, DOWNLOAD_DB_URL, INJECT_DB_URL, SERVER_DB_FILE};
+use pigeon::{AuthRequest, ChangeNameRequest, DownloadDbRequest, GetKeyRequest, InjectDbRequest, RegisterRequest};
+use reqwest::{Client, StatusCode};
+use std::path::Path;
+use std::time::Duration;
+
+const NETWORK_ERROR_SLEEP: Duration = Duration::from_secs(1);
 
 fn handle_network_error(e: &reqwest::Error) {
     // for network errors, wait a bit and try again
@@ -17,7 +19,6 @@ fn handle_network_error(e: &reqwest::Error) {
     if let Some(source) = std::error::Error::source(&e) {
         debug_print_above!("Caused by: {:?}", source);
     }
-    std::thread::sleep(Duration::from_secs(1));
 }
 
 /// ONLY CALL if status is an ERROR
@@ -27,45 +28,47 @@ fn handle_status_errors(status: reqwest::StatusCode) -> AnyError {
         StatusCode::INTERNAL_SERVER_ERROR => return "Error: Internal server error".into(),
         StatusCode::FORBIDDEN => return "Error: Authentication failed".into(),
         StatusCode::EXPECTATION_FAILED => return "Error: Expectation failed".into(),
-        status_code => return format!("Error: unexpected status code {}, something went very wrong", status_code).into(),
+        status_code => {
+            return format!(
+                "Error: unexpected status code {}, something went very wrong",
+                status_code
+            )
+            .into();
+        }
     }
 }
 
-pub async fn create_name_and_register(path_prefix: &Path, publickey: &PublicKey, is_online: bool) -> Result<ArrayString<32>> {
+pub async fn create_name_and_register(
+    path_prefix: &Path,
+    publickey: &PublicKey,
+    is_online: bool,
+    client: &Client,
+) -> Result<ArrayString<32>> {
     let name_path = path_prefix.join(NAME_FILE);
     let name_arraystring = loop {
         let potential_name = read_name().await;
         if is_online {
-            let result = register_http(&potential_name, publickey).await;
-            if result.is_ok() { break potential_name }
-            else { println!("That name is taken"); }
+            let result = register_http(&potential_name, publickey, client).await;
+            if result.is_ok() {
+                break potential_name;
+            } else {
+                println!("That name is taken");
+            }
+        } else {
+            break potential_name;
         }
-        else { break potential_name }
     };
 
-    if let Some(parent) = name_path.parent() && !parent.as_os_str().is_empty() {
+    if let Some(parent) = name_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
         std::fs::create_dir_all(parent).std_context("create config dir")?;
     }
     std::fs::write(name_path, name_arraystring.to_string()).std_context("write name file")?;
     return Ok(name_arraystring);
 }
 
-fn build_client() -> Result<Client> {
-    if *USE_CUSTOM_HTTPS {
-        let cert_bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/rootCA.pem")).expect("custom https requested but cannot read certificate file rootCA.pem");
-        let ca_cert = Certificate::from_pem(&cert_bytes).anyerr()?;
-        reqwest::Client::builder().tls_certs_merge([ca_cert]).build().anyerr()
-    }
-    else {
-        Ok(reqwest::Client::new())
-    }
-}
-
-pub async fn get_public_key(
-    target: &ArrayString<32>,
-) -> Result<PublicKey, reqwest::Error> {
-    let client = build_client().expect("failed to create http client");
-
+pub async fn get_public_key(target: &ArrayString<32>, client: &Client) -> Result<PublicKey, reqwest::Error> {
     let request = GetKeyRequest { target: *target };
     let payload = postcard::to_allocvec(&request).expect("failed to serialize request");
 
@@ -84,21 +87,25 @@ pub async fn get_public_key(
                 }
                 if status.is_success() {
                     let response_bytes = res.bytes().await?;
-                    let publickey: PublicKey = postcard::from_bytes(&response_bytes).expect("failed to deserialize response bytes");
-                    return Ok(publickey)
+                    let publickey: PublicKey =
+                        postcard::from_bytes(&response_bytes).expect("failed to deserialize response bytes");
+                    return Ok(publickey);
                 }
                 // other responses are unexpected, something went wrong
             }
             Err(e) => {
                 handle_network_error(&e);
+                tokio::time::sleep(NETWORK_ERROR_SLEEP).await;
             }
         }
     }
 }
 
-pub async fn register_http(name: &ArrayString<32>, publickey: &PublicKey) -> Result<(), reqwest::Error> {
-    let client = build_client().expect("failed to build http client");
-
+pub async fn register_http(
+    name: &ArrayString<32>,
+    publickey: &PublicKey,
+    client: &Client,
+) -> Result<(), reqwest::Error> {
     let request = RegisterRequest {
         name: *name,
         publickey: *publickey,
@@ -110,6 +117,7 @@ pub async fn register_http(name: &ArrayString<32>, publickey: &PublicKey) -> Res
 
         match response {
             Ok(res) => {
+                println!("FIRST");
                 let status = res.status();
                 if let Err(reqwest_err) = res.error_for_status_ref() {
                     let error_text = res.text().await?;
@@ -118,22 +126,24 @@ pub async fn register_http(name: &ArrayString<32>, publickey: &PublicKey) -> Res
                     return Err(reqwest_err);
                 }
                 if status.is_success() {
-                    return Ok(())
+                    return Ok(());
                 }
                 // other responses are unexpected, something went wrong
             }
             Err(e) => {
+                println!("SECOND");
                 handle_network_error(&e);
+                tokio::time::sleep(NETWORK_ERROR_SLEEP).await;
             }
         }
     }
 }
 
 async fn start_auth(client: &reqwest::Client, secret_key: &SecretKey) -> Result<Signature> {
-    let name = ONLINE_USERNAME.get().expect("Cannot do this unless you are connected to the internet");
-    let auth_request = AuthRequest {
-        name: name.clone(),
-    };
+    let name = ONLINE_USERNAME
+        .get()
+        .expect("Cannot do this unless you are connected to the internet");
+    let auth_request = AuthRequest { name: name.clone() };
     let payload = postcard::to_allocvec(&auth_request).anyerr()?;
     let response = client.post(&*START_AUTH_URL).body(payload).send().await.anyerr()?;
 
@@ -141,7 +151,7 @@ async fn start_auth(client: &reqwest::Client, secret_key: &SecretKey) -> Result<
     let text = response.text().await.anyerr()?;
     if !status.is_success() {
         eprintln!("Received error response: {}, {}", status, text);
-        return Err("start_auth failed".into())
+        return Err("start_auth failed".into());
     }
 
     let challenge_bytes = hex::decode(&text).anyerr()?;
@@ -149,8 +159,7 @@ async fn start_auth(client: &reqwest::Client, secret_key: &SecretKey) -> Result<
     Ok(signature)
 }
 
-pub async fn change_name(new_name: &ArrayString<32>, secret_key: &SecretKey) -> Result<()> {
-    let client = build_client()?;
+pub async fn change_name(new_name: &ArrayString<32>, secret_key: &SecretKey, client: &Client) -> Result<()> {
     let signature = start_auth(&client, secret_key).await?;
     let old_name = *ONLINE_USERNAME.get().unwrap();
     let change_name_request = ChangeNameRequest {
@@ -163,7 +172,7 @@ pub async fn change_name(new_name: &ArrayString<32>, secret_key: &SecretKey) -> 
     let response = client.post(&*CHANGE_NAME_URL).body(payload).send().await.anyerr()?;
     let status = response.status();
     if !status.is_success() {
-        return Err(handle_status_errors(status))
+        return Err(handle_status_errors(status));
     }
 
     std::fs::write(DATA_DIR.join(NAME_FILE), new_name.to_string())?;
@@ -173,29 +182,27 @@ pub async fn change_name(new_name: &ArrayString<32>, secret_key: &SecretKey) -> 
     Ok(())
 }
 
-pub async fn change_name_interactive(secret_key: &SecretKey) -> Result<()> {
+pub async fn change_name_interactive(secret_key: &SecretKey, client: &Client) -> Result<()> {
     let new_name = loop {
         let potential_name = read_name().await;
-        let result = get_public_key(&potential_name).await; // use get_public_key cause we actually know why it fails when it does
-        if let Err(err) = result && let Some(status) = err.status() && status == StatusCode::BAD_REQUEST {
+        let result = get_public_key(&potential_name, &client).await; // use get_public_key cause we actually know why it fails when it does
+        if let Err(err) = result
+            && let Some(status) = err.status()
+            && status == StatusCode::BAD_REQUEST
+        {
             break potential_name;
         }
         println!("That name is already taken, or a different error occured");
     };
 
-    change_name(&new_name, secret_key).await
+    change_name(&new_name, secret_key, client).await
 }
 
-
-pub async fn download_db(secret_key: &SecretKey) -> Result<()> {
-    let client = build_client()?;
+pub async fn download_db(secret_key: &SecretKey, client: &Client) -> Result<()> {
     let signature = start_auth(&client, secret_key).await?;
     let name = *ONLINE_USERNAME.get().unwrap();
 
-    let download_db_request = DownloadDbRequest {
-        name,
-        signature,
-    };
+    let download_db_request = DownloadDbRequest { name, signature };
     let payload = postcard::to_allocvec(&download_db_request).anyerr()?;
 
     let result = client.get(&*DOWNLOAD_DB_URL).body(payload).send().await;
@@ -203,7 +210,7 @@ pub async fn download_db(secret_key: &SecretKey) -> Result<()> {
         Ok(response) => {
             let status = response.status();
             if !status.is_success() {
-                return Err(handle_status_errors(status))
+                return Err(handle_status_errors(status));
             }
             let db_bytes = response.bytes().await.anyerr()?;
             std::fs::write(SERVER_DB_FILE, db_bytes)?;
@@ -216,8 +223,7 @@ pub async fn download_db(secret_key: &SecretKey) -> Result<()> {
     Ok(())
 }
 
-pub async fn inject_db(secret_key: &SecretKey) -> Result<()> {
-    let client = build_client()?;
+pub async fn inject_db(secret_key: &SecretKey, client: &Client) -> Result<()> {
     let signature = start_auth(&client, secret_key).await?;
     let name = *ONLINE_USERNAME.get().unwrap();
 
@@ -235,8 +241,7 @@ pub async fn inject_db(secret_key: &SecretKey) -> Result<()> {
             let status = response.status();
             if status.is_success() {
                 Ok(())
-            }
-            else {
+            } else {
                 Err(handle_status_errors(status))
             }
         }
