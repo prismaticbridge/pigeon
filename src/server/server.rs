@@ -75,10 +75,13 @@ async fn handle_registration(
 ) -> Result<(StatusCode, &'static str), (StatusCode, &'static str)> {
     let payload: RegisterRequest =
         postcard::from_bytes(&body).map_err(|_| (StatusCode::BAD_REQUEST, "invalid postcard binary payload"))?;
+    if payload.name.chars().all(|c| c.is_ascii_digit()) {
+        return Err((StatusCode::BAD_REQUEST, "name cannot be a number"));
+    }
     let mut db = state.clients.lock().await;
     if db.contains_key(&payload.name) {
         debug_print!("Failed to create user: {}", payload.name);
-        Ok((StatusCode::BAD_REQUEST, "that name is already registered"))
+        Err((StatusCode::BAD_REQUEST, "that name is already registered"))
     } else {
         db.insert(payload.name, (payload.publickey, None));
         debug_print!("Created new user: {}", payload.name);

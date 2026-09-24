@@ -15,10 +15,10 @@ const NETWORK_ERROR_SLEEP: Duration = Duration::from_secs(1);
 
 fn handle_network_error(e: &reqwest::Error) {
     // for network errors, wait a bit and try again
-    safe_print(&format!("network error: {}", e));
-    if let Some(source) = std::error::Error::source(&e) {
-        debug_print_above!("Caused by: {:?}", source);
-    }
+    // safe_print(&format!("network error: {}", e));
+    // if let Some(source) = std::error::Error::source(&e) {
+    //     debug_print_above!("Caused by: {:?}", source);
+    // }
 }
 
 /// ONLY CALL if status is an ERROR
@@ -47,6 +47,10 @@ pub async fn create_name_and_register(
     let name_path = path_prefix.join(NAME_FILE);
     let name_arraystring = loop {
         let potential_name = read_name().await;
+        if potential_name.chars().all(|c| c.is_ascii_digit()) {
+            println!("Name cannot consist of only numbers");
+            continue;
+        }
         if is_online {
             let result = register_http(&potential_name, publickey, client).await;
             if result.is_ok() {
@@ -68,35 +72,59 @@ pub async fn create_name_and_register(
     return Ok(name_arraystring);
 }
 
-pub async fn get_public_key(target: &ArrayString<32>, client: &Client) -> Result<PublicKey, reqwest::Error> {
-    let request = GetKeyRequest { target: *target };
-    let payload = postcard::to_allocvec(&request).expect("failed to serialize request");
-
+///Returns Ok(Publickey) if successful, Err(Ok(StatusCode)) if the request worked but the server returned an error
+///or Err(Err(e)) if the request failed (unknown error)
+///Attempt to get public key for a target name, retry indefinitely on network errors
+pub async fn get_public_key(target: &ArrayString<32>, client: &Client) -> Result<PublicKey, StatusCode> {
     loop {
-        //send post
-        let response = client.get(&(*GETKEY_URL)).body(payload.clone()).send().await;
-
-        match response {
-            Ok(res) => {
-                let status = res.status();
-                if let Err(reqwest_err) = res.error_for_status_ref() {
-                    let error_text = res.text().await?;
-                    debug_print_above!("error response: {}: {}", status, error_text);
-
-                    return Err(reqwest_err);
-                }
-                if status.is_success() {
-                    let response_bytes = res.bytes().await?;
-                    let publickey: PublicKey =
-                        postcard::from_bytes(&response_bytes).expect("failed to deserialize response bytes");
-                    return Ok(publickey);
-                }
-                // other responses are unexpected, something went wrong
-            }
-            Err(e) => {
-                handle_network_error(&e);
+        let get_key_result = try_once_get_public_key(target, client).await;
+        match get_key_result {
+            Ok(publickey) => return Ok(publickey),
+            Err(Ok(server_err)) => return Err(server_err),
+            Err(Err(_)) => {
+                //network error was already printed by the inner function
                 tokio::time::sleep(NETWORK_ERROR_SLEEP).await;
             }
+        }
+    }
+}
+
+///Same as get_public_key, but instead of retrying on network errors, it returns Err(Err(e)) where e is the network error
+pub async fn try_once_get_public_key(
+    target: &ArrayString<32>,
+    client: &Client,
+) -> Result<PublicKey, Result<StatusCode>> {
+    let request = GetKeyRequest { target: *target };
+    let payload = match postcard::to_allocvec(&request) {
+        Ok(payload) => payload,
+        Err(e) => return Err(Err(e).anyerr()),
+    };
+
+    let response = client.get(&(*GETKEY_URL)).body(payload.clone()).send().await;
+    match response {
+        Ok(res) => {
+            let status = res.status();
+            if let Err(reqwest_err) = res.error_for_status_ref() {
+                let error_text = res.text().await.map_err(|_| Err(reqwest_err).anyerr())?;
+                debug_print_above!("error response: {}: {}", status, error_text);
+
+                return Err(Ok(status));
+            } else {
+                let response_bytes = match res.bytes().await {
+                    Ok(bytes) => bytes,
+                    Err(e) => return Err(Err(e).anyerr()),
+                };
+                //confusing syntax but this returns from the function
+                match postcard::from_bytes(&response_bytes) {
+                    Ok(key) => Ok(key),
+                    Err(e) => Err(Err(e).anyerr()),
+                }
+            }
+            // other responses are unexpected, something went wrong
+        }
+        Err(e) => {
+            handle_network_error(&e);
+            return Err(Err(e).anyerr());
         }
     }
 }
@@ -117,11 +145,10 @@ pub async fn register_http(
 
         match response {
             Ok(res) => {
-                println!("FIRST");
                 let status = res.status();
                 if let Err(reqwest_err) = res.error_for_status_ref() {
                     let error_text = res.text().await?;
-                    debug_print_above!("error response: {}: {}", status, error_text);
+                    safe_print(&error_text);
 
                     return Err(reqwest_err);
                 }
@@ -131,7 +158,6 @@ pub async fn register_http(
                 // other responses are unexpected, something went wrong
             }
             Err(e) => {
-                println!("SECOND");
                 handle_network_error(&e);
                 tokio::time::sleep(NETWORK_ERROR_SLEEP).await;
             }
@@ -185,9 +211,8 @@ pub async fn change_name(new_name: &ArrayString<32>, secret_key: &SecretKey, cli
 pub async fn change_name_interactive(secret_key: &SecretKey, client: &Client) -> Result<()> {
     let new_name = loop {
         let potential_name = read_name().await;
-        let result = get_public_key(&potential_name, &client).await; // use get_public_key cause we actually know why it fails when it does
-        if let Err(err) = result
-            && let Some(status) = err.status()
+        let result = get_public_key(&potential_name, &client).await;
+        if let Err(status) = result
             && status == StatusCode::BAD_REQUEST
         {
             break potential_name;

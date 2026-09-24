@@ -2,9 +2,9 @@ use crate::USE_SERVER;
 use crate::api_wrapper::get_public_key;
 use crate::mdns::get_endpoint_info_mdns;
 use arrayvec::{ArrayString, CapacityError};
-use iroh::Endpoint;
 use iroh::endpoint::{Connection, ConnectionError};
 use iroh::endpoint_info::{EndpointData, EndpointInfo};
+use iroh::{Endpoint, PublicKey};
 use n0_error::StdResultExt;
 use n0_error::{Result, anyerr};
 use pigeon::common::{SECRET_KEY, bind_endpoint};
@@ -15,6 +15,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Mutex, atomic};
 use std::time::Duration;
 
+pub static CACHED_KEYS: Mutex<Vec<(ArrayString<32>, PublicKey)>> = Mutex::new(Vec::new());
 pub static PRINT_QUEUE: Mutex<Vec<String>> = Mutex::new(Vec::new());
 pub static PRINT_BLOCKED: atomic::AtomicBool = AtomicBool::new(false);
 
@@ -62,25 +63,66 @@ macro_rules! debug_print_above {
 }
 
 pub enum DiscoveryType {
+    CACHE,
     MDNS,
     SERVER,
 }
 
 ///Interactively prompt the user for names until they enter a name that can be resolved to a public key
-pub async fn get_endpoint_info_interactive() -> (EndpointInfo, DiscoveryType) {
+pub async fn get_endpoint_info_interactive(ignore_cache: bool) -> (EndpointInfo, DiscoveryType) {
     let mut buf = String::new();
     loop {
         safe_input("Target username: ", &mut buf);
         let name: ArrayString<32> = ArrayString::from(buf.trim()).unwrap();
+        let cached_key_entry = if ignore_cache {
+            None
+        } else {
+            CACHED_KEYS
+                .lock()
+                .map(|map| {
+                    map.iter()
+                        .enumerate()
+                        .find(|(_, (cached_name, _))| name == *cached_name)
+                        .map(|(idx, item)| (idx, item.clone()))
+                })
+                .unwrap_or(None)
+        };
         let info_option_mdns = get_endpoint_info_mdns(&name).await;
         if let Some(info) = info_option_mdns {
+            //check against cached key
+            if let Ok(mut map) = CACHED_KEYS.lock() {
+                if let Some((idx, (_, key))) = cached_key_entry {
+                    map.remove(idx);
+                    if key != info.endpoint_id {
+                        safe_print(
+                            "Warning: Peer sent a key that does not match the one in cache, they either changed their name or are being impersonated",
+                        );
+                    } else {
+                        //put back at the beginning cause it was correct
+                        map.insert(0, (name, info.endpoint_id));
+                    }
+                } else {
+                    //not in cache so add it
+                    map.insert(0, (name, info.endpoint_id));
+                }
+            }
             return (info, DiscoveryType::MDNS);
+        }
+        //if its not in mdns, try using the cache
+        if let Some((_, (_, key))) = cached_key_entry {
+            return (
+                EndpointInfo::from_parts(key, EndpointData::default()),
+                DiscoveryType::CACHE,
+            );
         }
         //if mdns doesn't find it yet, then use the server
         if USE_SERVER.get().unwrap_or(&false).clone() {
             let result = get_public_key(&name, &HTTP_CLIENT).await;
             match result {
                 Ok(key) => {
+                    if let Ok(mut map) = CACHED_KEYS.lock() {
+                        map.insert(0, (name, key));
+                    }
                     return (
                         EndpointInfo::from_parts(key, EndpointData::default()),
                         DiscoveryType::SERVER,
@@ -157,4 +199,22 @@ pub async fn read_name() -> ArrayString<32> {
             println!("Something's wrong with that name, its probably too long");
         }
     }
+}
+
+///Attempts to load key cache from file
+pub fn try_load_key_cache(key_path: &Path) -> Result<Vec<(ArrayString<32>, PublicKey)>> {
+    let result = std::fs::read_to_string(key_path)
+        .std_context("read key cache")
+        .map(|s| serde_json::from_str(&s).unwrap_or_default())
+        .map_err(|e| e.into());
+    result
+}
+
+///Saves key cache to file
+pub fn save_key_cache(key_path: &Path) {
+    println!("saving key cache to {}", key_path.display());
+    let cache = CACHED_KEYS.lock().unwrap().clone();
+    std::fs::write(key_path, serde_json::to_string(&cache).unwrap())
+        .std_context("save key cache")
+        .ok();
 }

@@ -102,5 +102,5 @@ pub async fn exchange_info_mdns(endpoint: Endpoint) -> Result<()> {
 
 ///Wrapper to retrieve the endpoint info for a given username, if it was discovered with mdns
 pub async fn get_endpoint_info_mdns(target: &ArrayString<32>) -> Option<EndpointInfo> {
-    MDNS_USERS.get().unwrap().read().await.get(target).map(|k| k.clone())
+    MDNS_USERS.get()?.read().await.get(target).map(|k| k.clone())
 }

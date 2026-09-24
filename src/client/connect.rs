@@ -273,3 +273,15 @@ pub async fn connect_and_send(
 
     Ok(())
 }
+
+#[derive(Clone)]
+pub struct ConnectTargetInfo {
+    pub endpoint: Endpoint,
+    pub target: EndpointInfo,
+    pub path: PathBuf,
+    pub sender_name: ArrayString<32>,
+}
+
+pub async fn connect_async_wrapper(data: ConnectTargetInfo) -> Result<()> {
+    connect_and_send(&data.endpoint, &data.target, &data.path, &data.sender_name).await
+}

@@ -35,6 +35,7 @@ pub static DATA_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
 });
 pub const NAME_FILE: &str = "username.txt";
 pub const CLIENT_KEY_FILE: &str = "ed25519_key";
+pub const KEY_CACHE_FILE: &str = "key_cache.json";
 
 pub const CHUNK_SIZE: usize = 64 * 1024;
 

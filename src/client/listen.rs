@@ -201,7 +201,9 @@ pub async fn listen(endpoint: Endpoint) -> Result<()> {
             }
         };
 
-        let (mut send, mut recv) = conn.accept_bi().await.anyerr()?;
+        let Ok((mut send, mut recv)) = conn.accept_bi().await.anyerr() else {
+            continue;
+        };
         let remote_id = conn.remote_id();
         let connection_info = endpoint.remote_info(remote_id).await;
 
@@ -253,7 +255,9 @@ pub async fn receive_file_connection(
     }
     //if its not local, verify the public key with the server
     if !trusted {
-        let real_publickey = get_public_key(&claimed_sender_name, &HTTP_CLIENT).await.anyerr()?;
+        let real_publickey = get_public_key(&claimed_sender_name, &HTTP_CLIENT)
+            .await
+            .map_err(|e| anyerr!("Cannot verify peer's remote identity because the server returned error code {e}"))?;
         let peer_publickey = conn.remote_id();
         if real_publickey != peer_publickey {
             return Err(
