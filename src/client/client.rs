@@ -10,7 +10,7 @@ mod mdns;
 mod utils;
 
 use pigeon::common::{MDNS_USERNAME, ONLINE_USERNAME, SECRET_KEY, load_or_create_identity};
-use pigeon::constants::{self, HTTP_CLIENT};
+use pigeon::constants::{self, DATA_DIR, HTTP_CLIENT, KEY_CACHE_FILE};
 
 use crate::api_wrapper::{
     change_name_interactive, create_name_and_register, delete_account, download_db, get_public_key, inject_db,
@@ -84,8 +84,9 @@ async fn online_thread() -> Result<()> {
         cache.clone()
     };
 
-    let mut i = 0;
-    while i < cache_clone.len() {
+    let mut keys_to_remove = Vec::new();
+
+    for i in 0..cache_clone.len() {
         let (name, key) = &cache_clone[i];
         let server_key = get_public_key(name, client).await;
         match server_key {
@@ -95,28 +96,43 @@ async fn online_thread() -> Result<()> {
                     //key mismatch means its actually someone else, since its not possible to change keys
                     //(cached account changed name and then someone changed name to match cached account)
                     //so remove it entirely (don't update the key)
-                    if let Ok(mut map) = CACHED_KEYS.lock() {
-                        map.remove(i);
-                    } else {
-                        i += 1;
-                    }
-                } else {
-                    i += 1;
+                    keys_to_remove.push(i);
                 }
             }
             Err(e) => {
                 safe_print(&format!(
                     "Key for {name} no longer exists, or other error ({e}), removing"
                 ));
-                if let Ok(mut map) = CACHED_KEYS.lock() {
-                    map.remove(i);
-                } else {
-                    i += 1;
-                }
+                keys_to_remove.push(i);
             }
         }
     }
 
+    if keys_to_remove.is_empty() {
+        return Ok(());
+    }
+    if let Ok(mut map) = CACHED_KEYS.lock() {
+        let mut remove_iter = keys_to_remove.iter().copied().peekable();
+        let mut write_idx = 0;
+
+        for read_idx in 0..map.len() {
+            if remove_iter.peek() == Some(&read_idx) {
+                remove_iter.next();
+            } else {
+                if write_idx != read_idx {
+                    map.swap(write_idx, read_idx);
+                }
+                write_idx += 1;
+            }
+        }
+
+        map.truncate(write_idx);
+    }
+
+    save_key_cache(&DATA_DIR.join(KEY_CACHE_FILE));
+    safe_print(
+        "WARNING: Some cache entries did not match the server, so the printed ones are incorrect. Restarting pigeon will fix this issue.",
+    );
     Ok(())
 }
 
