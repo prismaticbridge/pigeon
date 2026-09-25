@@ -7,8 +7,9 @@ use iroh::endpoint_info::{EndpointData, EndpointInfo};
 use iroh::{Endpoint, PublicKey};
 use n0_error::StdResultExt;
 use n0_error::{Result, anyerr};
-use pigeon::common::{SECRET_KEY, bind_endpoint};
-use pigeon::constants::HTTP_CLIENT;
+use pigeon::common::{ONLINE_USERNAME, SECRET_KEY, bind_endpoint};
+use pigeon::constants::{HTTP_CLIENT, MAX_DISPLAYED_ENTRIES};
+use std::cmp::min;
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -71,9 +72,27 @@ pub enum DiscoveryType {
 ///Interactively prompt the user for names until they enter a name that can be resolved to a public key
 pub async fn get_endpoint_info_interactive(ignore_cache: bool) -> (EndpointInfo, DiscoveryType) {
     let mut buf = String::new();
+    if let Ok(keys) = CACHED_KEYS.lock() {
+        for i in 0..min(keys.len(), MAX_DISPLAYED_ENTRIES) {
+            safe_print(&format!(" {i} {}", keys[i].0));
+        }
+    }
     loop {
-        safe_input("Target username: ", &mut buf);
-        let name: ArrayString<32> = ArrayString::from(buf.trim()).unwrap();
+        safe_input("Target username, or number to use one of the above entries: ", &mut buf);
+        let user_input_name: ArrayString<32> = ArrayString::from(buf.trim()).unwrap();
+        let name = if user_input_name.chars().all(|c| c.is_ascii_digit()) {
+            let index: usize = user_input_name
+                .parse()
+                .expect("Number entered has something wrong with it");
+            if let Ok(keys) = CACHED_KEYS.lock() {
+                keys[index].0
+            } else {
+                safe_print("Error: failed to aquire lock on cached keys");
+                continue;
+            }
+        } else {
+            user_input_name
+        };
         let cached_key_entry = if ignore_cache {
             None
         } else {
@@ -217,4 +236,16 @@ pub fn save_key_cache(key_path: &Path) {
     std::fs::write(key_path, serde_json::to_string(&cache).unwrap())
         .std_context("save key cache")
         .ok();
+}
+
+pub async fn wait_online() -> Result<()> {
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        tokio::task::spawn_blocking(|| {
+            ONLINE_USERNAME.wait();
+        }),
+    )
+    .await
+    .anyerr()?
+    .anyerr()
 }

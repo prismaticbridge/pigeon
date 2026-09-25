@@ -1,7 +1,7 @@
 use directories::ProjectDirs;
 use iroh::PublicKey;
 use reqwest::{Certificate, Client};
-use std::{path::PathBuf, sync::LazyLock}; // Standard library in modern Rust
+use std::{path::PathBuf, sync::LazyLock};
 
 static SERVER_URL: LazyLock<String> =
     LazyLock::new(|| std::env::var("SERVER_URL").unwrap_or(String::from("https://pigeon-87r8.onrender.com")));
@@ -12,6 +12,7 @@ pub static START_AUTH_URL: LazyLock<String> = LazyLock::new(|| format!("{}/start
 pub static CHANGE_NAME_URL: LazyLock<String> = LazyLock::new(|| format!("{}/change_name", *SERVER_URL));
 pub static DOWNLOAD_DB_URL: LazyLock<String> = LazyLock::new(|| format!("{}/download_db", *SERVER_URL));
 pub static INJECT_DB_URL: LazyLock<String> = LazyLock::new(|| format!("{}/inject_db", *SERVER_URL));
+pub static DELETE_URL: LazyLock<String> = LazyLock::new(|| format!("{}/delete", *SERVER_URL));
 
 pub static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
     if *USE_CUSTOM_HTTPS {
@@ -55,3 +56,4 @@ pub const ADMIN_KEYS: LazyLock<[PublicKey; 1]> = LazyLock::new(|| {
 });
 
 pub const SERVER_DB_FILE: &str = "server.db";
+pub const MAX_DISPLAYED_ENTRIES: usize = 9;

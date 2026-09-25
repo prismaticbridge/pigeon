@@ -5,8 +5,10 @@ use arrayvec::ArrayString;
 use iroh::{PublicKey, SecretKey, Signature};
 use n0_error::{AnyError, Result, StdResultExt, anyerr};
 use pigeon::common::ONLINE_USERNAME;
-use pigeon::constants::{DATA_DIR, DOWNLOAD_DB_URL, INJECT_DB_URL, SERVER_DB_FILE};
-use pigeon::{AuthRequest, ChangeNameRequest, DownloadDbRequest, GetKeyRequest, InjectDbRequest, RegisterRequest};
+use pigeon::constants::{CLIENT_KEY_FILE, DATA_DIR, DELETE_URL, DOWNLOAD_DB_URL, INJECT_DB_URL, SERVER_DB_FILE};
+use pigeon::{
+    AuthRequest, ChangeNameRequest, DeleteRequest, DownloadDbRequest, GetKeyRequest, InjectDbRequest, RegisterRequest,
+};
 use reqwest::{Client, StatusCode};
 use std::path::Path;
 use std::time::Duration;
@@ -15,10 +17,10 @@ const NETWORK_ERROR_SLEEP: Duration = Duration::from_secs(1);
 
 fn handle_network_error(e: &reqwest::Error) {
     // for network errors, wait a bit and try again
-    // safe_print(&format!("network error: {}", e));
-    // if let Some(source) = std::error::Error::source(&e) {
-    //     debug_print_above!("Caused by: {:?}", source);
-    // }
+    safe_print(&format!("network error: {}", e));
+    if let Some(source) = std::error::Error::source(&e) {
+        debug_print_above!("Caused by: {:?}", source);
+    }
 }
 
 /// ONLY CALL if status is an ERROR
@@ -235,6 +237,11 @@ pub async fn download_db(secret_key: &SecretKey, client: &Client) -> Result<()> 
         Ok(response) => {
             let status = response.status();
             if !status.is_success() {
+                if status == StatusCode::FORBIDDEN {
+                    safe_print(
+                        "Server denied elevated access, this is probably normal if you're not the pigeon developer",
+                    );
+                }
                 return Err(handle_status_errors(status));
             }
             let db_bytes = response.bytes().await.anyerr()?;
@@ -250,7 +257,7 @@ pub async fn download_db(secret_key: &SecretKey, client: &Client) -> Result<()> 
 
 pub async fn inject_db(secret_key: &SecretKey, client: &Client) -> Result<()> {
     let signature = start_auth(&client, secret_key).await?;
-    let name = *ONLINE_USERNAME.get().unwrap();
+    let name = *ONLINE_USERNAME.get().anyerr()?;
 
     let db_bytes = std::fs::read(SERVER_DB_FILE)?;
     let inject_db_request = InjectDbRequest {
@@ -265,6 +272,37 @@ pub async fn inject_db(secret_key: &SecretKey, client: &Client) -> Result<()> {
         Ok(response) => {
             let status = response.status();
             if status.is_success() {
+                Ok(())
+            } else {
+                if status == StatusCode::FORBIDDEN {
+                    safe_print(
+                        "Server denied elevated access, this is probably normal if you're not the pigeon developer",
+                    );
+                }
+                Err(handle_status_errors(status))
+            }
+        }
+        Err(e) => {
+            handle_network_error(&e);
+            Err(anyerr!(e))
+        }
+    }
+}
+
+pub async fn delete_account(secret_key: &SecretKey, client: &Client) -> Result<()> {
+    let signature = start_auth(client, secret_key).await?;
+    let name = *ONLINE_USERNAME.get().anyerr()?;
+
+    let delete_request = DeleteRequest { name, signature };
+    let payload = postcard::to_allocvec(&delete_request).anyerr()?;
+
+    let result = client.post(&*DELETE_URL).body(payload).send().await;
+    match result {
+        Ok(response) => {
+            let status = response.status();
+            if status.is_success() {
+                tokio::fs::remove_file(DATA_DIR.join(NAME_FILE)).await?;
+                tokio::fs::remove_file(DATA_DIR.join(CLIENT_KEY_FILE)).await?;
                 Ok(())
             } else {
                 Err(handle_status_errors(status))

@@ -61,3 +61,9 @@ pub struct InjectDbRequest {
     pub signature: Signature,
     pub db_bytes: Vec<u8>,
 }
+
+#[derive(Serialize, Deserialize)]
+pub struct DeleteRequest {
+    pub name: ArrayString<32>,
+    pub signature: Signature,
+}

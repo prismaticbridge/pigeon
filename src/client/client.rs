@@ -13,13 +13,14 @@ use pigeon::common::{MDNS_USERNAME, ONLINE_USERNAME, SECRET_KEY, load_or_create_
 use pigeon::constants::{self, HTTP_CLIENT};
 
 use crate::api_wrapper::{
-    change_name_interactive, create_name_and_register, download_db, get_public_key, inject_db, register_http,
+    change_name_interactive, create_name_and_register, delete_account, download_db, get_public_key, inject_db,
+    register_http,
 };
 use crate::connect::{ConnectTargetInfo, connect_async_wrapper};
 use crate::mdns::exchange_info_mdns;
 use crate::utils::{
     CACHED_KEYS, DiscoveryType, create_endpoint, get_endpoint_info_interactive, safe_print, save_key_cache,
-    try_load_key_cache, try_load_name,
+    try_load_key_cache, try_load_name, wait_online,
 };
 use listen::listen;
 
@@ -32,8 +33,10 @@ struct Args {
     #[arg(short, long)]
     change_name: bool,
     #[arg(short, long)]
+    delete_account: bool,
+    #[arg(long)]
     download_db: bool,
-    #[arg(short, long)]
+    #[arg(long)]
     inject_db: bool,
 }
 
@@ -151,27 +154,23 @@ async fn main() -> Result<()> {
 
     let online_thread = tokio::spawn(online_thread());
 
+    //Code duplication, but cleaning this up would make it harder to read
     if args.change_name {
-        //could technically use "key" but SECRET_KEY should be the single source of truth
-        return change_name_interactive(SECRET_KEY.get().unwrap(), &HTTP_CLIENT).await;
+        let _ = wait_online().await;
+        let secret_key = SECRET_KEY.get().expect("Failed to read private key");
+        return change_name_interactive(secret_key, &HTTP_CLIENT).await;
+    } else if args.delete_account {
+        let _ = wait_online().await;
+        let secret_key = SECRET_KEY.get().expect("Failed to read private key");
+        return delete_account(secret_key, &HTTP_CLIENT).await;
     } else if args.download_db {
-        tokio::time::timeout(
-            tokio::time::Duration::from_secs(5),
-            tokio::task::spawn_blocking(|| ONLINE_USERNAME.wait()),
-        )
-        .await
-        .anyerr()?
-        .anyerr()?;
-        return download_db(SECRET_KEY.get().unwrap(), &HTTP_CLIENT).await;
+        let _ = wait_online().await;
+        let secret_key = SECRET_KEY.get().expect("Failed to read private key");
+        return download_db(secret_key, &HTTP_CLIENT).await;
     } else if args.inject_db {
-        tokio::time::timeout(
-            tokio::time::Duration::from_secs(5),
-            tokio::task::spawn_blocking(|| ONLINE_USERNAME.wait()),
-        )
-        .await
-        .anyerr()?
-        .anyerr()?;
-        return inject_db(SECRET_KEY.get().unwrap(), &HTTP_CLIENT).await;
+        let _ = wait_online().await;
+        let secret_key = SECRET_KEY.get().expect("Failed to read private key");
+        return inject_db(secret_key, &HTTP_CLIENT).await;
     }
 
     let endpoint = create_endpoint().await?;

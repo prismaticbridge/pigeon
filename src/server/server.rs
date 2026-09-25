@@ -9,6 +9,7 @@ use iroh::Signature;
 use pigeon::AuthRequest;
 use pigeon::ChangeNameRequest;
 use pigeon::ClientMap;
+use pigeon::DeleteRequest;
 use pigeon::DownloadDbRequest;
 use pigeon::GetKeyRequest;
 use pigeon::InjectDbRequest;
@@ -42,6 +43,7 @@ async fn main() {
         .route("/change_name", post(change_name))
         .route("/download_db", get(download_database))
         .route("/inject_db", post(inject_database))
+        .route("/delete", post(delete))
         .with_state(state);
 
     if *constants::USE_CUSTOM_HTTPS {
@@ -242,6 +244,25 @@ async fn inject_database(
     );
 
     db.extend(inject_db);
+
+    StatusCode::OK
+}
+
+async fn delete(axum::extract::State(state): axum::extract::State<SharedState>, body: axum::body::Bytes) -> StatusCode {
+    let Ok(payload) = postcard::from_bytes::<DeleteRequest>(&body) else {
+        return StatusCode::BAD_REQUEST;
+    };
+    let mut db = state.clients.lock().await;
+
+    if !verify_auth(&mut db, &payload.name, &payload.signature, false) {
+        debug_print!("Auth denied for user {} trying to delete their account", payload.name);
+        return StatusCode::FORBIDDEN;
+    }
+
+    let result = db.remove(&payload.name);
+    if result.is_none() {
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    }
 
     StatusCode::OK
 }
