@@ -50,7 +50,7 @@ pub const USE_CUSTOM_HTTPS: LazyLock<bool> = LazyLock::new(|| {
 });
 
 pub const ADMIN_KEYS: LazyLock<[PublicKey; 1]> = LazyLock::new(|| {
-    ["895bf370303e81cbb840494bbd0befa95e2c36114ffcb6b24504727e89990abd"]
+    ["d74fa72d4852bba71ca3e5db0d23d2e89153d168fd079087ea98ebf28e5985db"]
         .map(|str| hex::decode(str).expect("failed to decode key"))
         .map(|bytes| PublicKey::from_bytes(&bytes.try_into().expect("invalid length")).expect("invalid public key"))
 });
