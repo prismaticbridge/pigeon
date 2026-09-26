@@ -70,7 +70,7 @@ pub enum DiscoveryType {
 }
 
 ///Interactively prompt the user for names until they enter a name that can be resolved to a public key
-pub async fn get_endpoint_info_interactive(ignore_cache: bool) -> (EndpointInfo, DiscoveryType) {
+pub async fn get_endpoint_info_interactive(ignore_cache: bool) -> (ArrayString<32>, EndpointInfo, DiscoveryType) {
     let mut buf = String::new();
     if let Ok(keys) = CACHED_KEYS.lock() {
         for i in 0..min(keys.len(), MAX_DISPLAYED_ENTRIES) {
@@ -80,6 +80,9 @@ pub async fn get_endpoint_info_interactive(ignore_cache: bool) -> (EndpointInfo,
     loop {
         safe_input("Target username, or number to use one of the above entries: ", &mut buf);
         let user_input_name: ArrayString<32> = ArrayString::from(buf.trim()).unwrap();
+        if user_input_name.is_empty() {
+            continue;
+        }
         let name = if user_input_name.chars().all(|c| c.is_ascii_digit()) {
             let index: usize = user_input_name
                 .parse()
@@ -106,6 +109,7 @@ pub async fn get_endpoint_info_interactive(ignore_cache: bool) -> (EndpointInfo,
                 })
                 .unwrap_or(None)
         };
+        // println!("{}, {}", cached_key_entry.unwrap().1.0, cached_key_entry.unwrap().1.1);
         let info_option_mdns = get_endpoint_info_mdns(&name).await;
         if let Some(info) = info_option_mdns {
             //check against cached key
@@ -125,17 +129,19 @@ pub async fn get_endpoint_info_interactive(ignore_cache: bool) -> (EndpointInfo,
                     map.insert(0, (name, info.endpoint_id));
                 }
             }
-            return (info, DiscoveryType::MDNS);
+            return (name, info, DiscoveryType::MDNS);
         }
         //if its not in mdns, try using the cache
         if let Some((_, (_, key))) = cached_key_entry {
             return (
+                name,
                 EndpointInfo::from_parts(key, EndpointData::default()),
                 DiscoveryType::CACHE,
             );
         }
         //if mdns doesn't find it yet, then use the server
         if USE_SERVER.get().unwrap_or(&false).clone() {
+            debug_print_above!("Using server");
             let result = get_public_key(&name, &HTTP_CLIENT).await;
             match result {
                 Ok(key) => {
@@ -143,6 +149,7 @@ pub async fn get_endpoint_info_interactive(ignore_cache: bool) -> (EndpointInfo,
                         map.insert(0, (name, key));
                     }
                     return (
+                        name,
                         EndpointInfo::from_parts(key, EndpointData::default()),
                         DiscoveryType::SERVER,
                     );

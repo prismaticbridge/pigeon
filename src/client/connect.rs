@@ -228,14 +228,19 @@ pub async fn connect_and_send(
     let mut attempts = 0;
     let conn = loop {
         let conn_result = endpoint.connect(target.clone(), PIGEON_ALPN).await;
-        if let Ok(conn) = conn_result {
-            break conn;
-        }
-        if attempts < 5 {
-            attempts += 1;
-            safe_print(&format!("Connection failed, retrying {} more times", 5 - attempts));
-        } else {
-            return Err(anyerr!("Connection failed 5 times, exiting"));
+        match conn_result {
+            Ok(conn) => break conn,
+            Err(e) => {
+                if attempts < 5 {
+                    attempts += 1;
+                    safe_print(&format!(
+                        "Error: Connection failed: {e}, retrying {} more times",
+                        5 - attempts
+                    ));
+                } else {
+                    return Err(anyerr!("Connection failed 5 times, exiting"));
+                }
+            }
         }
     };
     let (mut send, mut recv) = conn.open_bi().await.anyerr()?;

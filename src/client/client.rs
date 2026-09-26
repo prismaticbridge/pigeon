@@ -1,5 +1,5 @@
 use clap::Parser;
-use n0_error::{Result, StdResultExt, anyerr};
+use n0_error::{Result, StdResultExt};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -10,7 +10,7 @@ mod mdns;
 mod utils;
 
 use pigeon::common::{MDNS_USERNAME, ONLINE_USERNAME, SECRET_KEY, load_or_create_identity};
-use pigeon::constants::{self, DATA_DIR, HTTP_CLIENT, KEY_CACHE_FILE};
+use pigeon::constants::{self, HTTP_CLIENT};
 
 use crate::api_wrapper::{
     change_name_interactive, create_name_and_register, delete_account, download_db, get_public_key, inject_db,
@@ -34,6 +34,8 @@ struct Args {
     change_name: bool,
     #[arg(short, long)]
     delete_account: bool,
+    #[arg(long)]
+    disable_mdns: bool,
     #[arg(long)]
     download_db: bool,
     #[arg(long)]
@@ -75,64 +77,7 @@ async fn online_thread() -> Result<()> {
     }
 
     safe_print("Successfully connected to server, cross-network transfers are available");
-    //once everything is done, verify the cache is correct
-    //clone to avoid holding the lock while verifying
-    let cache_clone = {
-        let Ok(cache) = CACHED_KEYS.lock() else {
-            return Err(anyerr!("Failed to aquire lock on cached keys"));
-        };
-        cache.clone()
-    };
 
-    let mut keys_to_remove = Vec::new();
-
-    for i in 0..cache_clone.len() {
-        let (name, key) = &cache_clone[i];
-        let server_key = get_public_key(name, client).await;
-        match server_key {
-            Ok(server_key) => {
-                if server_key != *key {
-                    safe_print(&format!("Public key mismatch for {}", name));
-                    //key mismatch means its actually someone else, since its not possible to change keys
-                    //(cached account changed name and then someone changed name to match cached account)
-                    //so remove it entirely (don't update the key)
-                    keys_to_remove.push(i);
-                }
-            }
-            Err(e) => {
-                safe_print(&format!(
-                    "Key for {name} no longer exists, or other error ({e}), removing"
-                ));
-                keys_to_remove.push(i);
-            }
-        }
-    }
-
-    if keys_to_remove.is_empty() {
-        return Ok(());
-    }
-    if let Ok(mut map) = CACHED_KEYS.lock() {
-        let mut remove_iter = keys_to_remove.iter().copied().peekable();
-        let mut write_idx = 0;
-
-        for read_idx in 0..map.len() {
-            if remove_iter.peek() == Some(&read_idx) {
-                remove_iter.next();
-            } else {
-                if write_idx != read_idx {
-                    map.swap(write_idx, read_idx);
-                }
-                write_idx += 1;
-            }
-        }
-
-        map.truncate(write_idx);
-    }
-
-    save_key_cache(&DATA_DIR.join(KEY_CACHE_FILE));
-    safe_print(
-        "WARNING: Some cache entries did not match the server, so the printed ones are incorrect. Restarting pigeon will fix this issue.",
-    );
     Ok(())
 }
 
@@ -191,16 +136,20 @@ async fn main() -> Result<()> {
 
     let endpoint = create_endpoint().await?;
 
-    let mdns_lookup_thread = tokio::spawn(exchange_info_mdns(endpoint.clone()));
+    let mdns_lookup_thread = if args.disable_mdns {
+        None
+    } else {
+        Some(tokio::spawn(exchange_info_mdns(endpoint.clone())))
+    };
     let listen_thread = tokio::spawn(listen(endpoint.clone()));
 
     if let Some(send_path) = args.send_file {
-        let (target_info, discovery_type) = get_endpoint_info_interactive(false).await;
+        let (target_name, target_info, discovery_type) = get_endpoint_info_interactive(false).await;
         let mut try_server_concurrently = false;
         let connect_name = match discovery_type {
             DiscoveryType::MDNS => MDNS_USERNAME.get().unwrap(),
             DiscoveryType::CACHE => {
-                println!("using cache");
+                debug_print_above!("using cache");
                 try_server_concurrently = true;
                 if *USE_SERVER.get().unwrap_or(&false) {
                     ONLINE_USERNAME.get().unwrap()
@@ -222,18 +171,18 @@ async fn main() -> Result<()> {
         //simple case: we already queried the server, or don't need to because the peer was discovered with mdns
         if !try_server_concurrently {
             //async wrapper isn't actually needed here, but its cleaner to use it anyways
-            println!("Not using concurrency");
+            debug_print_above!("Not using concurrency");
             connect_async_wrapper(connect_data.clone()).await?;
         } else {
             //spawn connect task on a different thread
-            println!("Spawning async wrapper");
+            debug_print_above!("Spawning async wrapper");
             let mut join_handle = tokio::spawn(connect_async_wrapper(connect_data.clone()));
             //cache might be wrong, so concurrently retrieve the correct publickey
-            let real_key_result = get_public_key(&connect_data.sender_name, &HTTP_CLIENT).await;
+            let real_key_result = get_public_key(&target_name, &HTTP_CLIENT).await;
             if let Ok(real_key) = real_key_result {
                 if real_key != connect_data.target.endpoint_id {
                     //guaranteed that the connection will fail since it's using the wrong public key, abort
-                    println!("killing async wrapper");
+                    debug_print_above!("killing async wrapper");
                     join_handle.abort();
                     //while waiting for abort to run, remove the bad cache entry
                     let old_bad_key = connect_data.target.endpoint_id;
@@ -247,12 +196,12 @@ async fn main() -> Result<()> {
 
                     //we don't care about errors, it was aborted so probably failed
                     let _ = join_handle.await;
-                    println!("spawning new async wrapper");
+                    debug_print_above!("spawning new async wrapper");
                     join_handle = tokio::spawn(connect_async_wrapper(connect_data.clone()));
                 }
             }
 
-            println!("waiting for async wrapper to finish");
+            debug_print_above!("waiting for async wrapper to finish");
             join_handle.await.anyerr()??;
         }
 
@@ -267,9 +216,11 @@ async fn main() -> Result<()> {
         listen_thread.await.anyerr()??;
     }
 
-    if !mdns_lookup_thread.is_finished() {
-        mdns_lookup_thread.abort();
-        let _ = mdns_lookup_thread.await;
+    if let Some(mdns_thread) = mdns_lookup_thread
+        && !mdns_thread.is_finished()
+    {
+        mdns_thread.abort();
+        let _ = mdns_thread.await;
     }
     if !online_thread.is_finished() {
         online_thread.abort();
